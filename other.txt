@@ -1,0 +1,58 @@
+vec4 sdf(vec3 p, int get_color)
+{
+    float s = 0.;
+
+    vec3 square_c = vec3(0.5, 0.5, 0.0);
+    vec3 square_s = vec3(0.5, 0.5, 0.001);
+    float square_sdf = sdfBox(p, square_c, square_s);
+
+    s = square_sdf;
+
+    if (get_color == 0 || s > 0.001 || p.x > 1.0 || p.y > 1.0 || p.x < 0.0 || p.y < 0.0) {
+        return vec4(0.0, 0.0, 0.0, s); // return sdf value only
+    }
+
+    vec3 green = vec3(0.0, 1.0, 0.0);
+    vec3 diff = vec3(1.0, -1.0, 0.0);
+    float fft_magnitude = texture2D(iAudioTexture, vec2(p.x, p.y)).r;
+    vec3 color = green + diff * fft_magnitude; // color based on audio texture
+
+    return vec4(color, s); // return color and sdf value
+}
+
+vec4 sdf(vec3 p, int get_color)
+{
+    if (abs(p.y) > 1.1 || abs(p.x) > 2.6 || abs(p.z) > 2.6) {
+        return vec4(0.0, 0.0, 0.0, 100.0); // return color and sdf value
+    }
+
+    vec3 green = vec3(0.0, 1.0, 0.0);
+    vec3 yellow = vec3(1.0, 1.0, 0.0);
+    vec3 red = vec3(1.0, 0.0, 0.0);
+
+    float s = 100.0;
+    vec3 color = vec3(0.0, 0.0, 0.0);
+    for (int i = 0; i < FREQ_BUFFER_FRAMES; i++) {
+        for (int j = 0; j < LOG_FFT_SIZE; j++) {
+            float dB = dBs[i * LOG_FFT_SIZE + j];
+            vec3 box_c = vec3(float(j) * 0.3 - 3.45, 0.0, float(i) * 0.3);
+            vec3 box_s = vec3(0.1, 0.05 + dB * 2.0, 0.1);
+            float box_sdf = sdfBox(p, box_c, box_s); // SDF for the box
+            if (box_sdf < 0.001) {
+                s = box_sdf;
+                if (get_color == 0) {
+                    return vec4(0.0, 0.0, 0.0, s); // return sdf value only
+                } else {
+                    if (dB < 0.5) {
+                        color = mix(green, yellow, dB / 0.5); // interpolate between green and yellow
+                    } else {
+                        color = mix(yellow, red, (dB - 0.5) * 2.0); // interpolate between yellow and red
+                    }
+                    return vec4(color, s); // return color and sdf value
+                }
+            }
+        }
+    }
+
+    return vec4(0.0, 0.0, 0.0, 100.0); // return color and sdf value
+}

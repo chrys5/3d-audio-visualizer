@@ -1,15 +1,66 @@
-/////////////////////////////////////////////////////
-//// CS 8803/4803 CGAI: Computer Graphics in AI Era
-//// Assignment 1A: SDF and Ray Marching
-/////////////////////////////////////////////////////
-
 precision highp float;              //// set default precision of float variables to high precision
 
 varying vec2 vUv;                   //// screen uv coordinates (varying, from vertex shader)
 uniform vec2 iResolution;           //// screen resolution (uniform, from CPU)
 uniform float iTime;                //// time elapsed (uniform, from CPU)
+uniform sampler2D iAudioTexture;
+uniform int iAudioHead;
+uniform vec2 iAudioDimensions;
 
-const vec3 CAM_POS = vec3(-0.35, 1.0, -3.0);
+const vec3 CAM_POS = vec3(0.0, 1.3, -2.6);
+// const vec3 CAM_POS = vec3(0.0, 3.0, -9.0);
+
+
+const int LOG_FFT_SIZE = 15;
+const int FREQ_BUFFER_FRAMES = 5;
+const int BUFFER_SIZE = LOG_FFT_SIZE * FREQ_BUFFER_FRAMES;
+float dBs[BUFFER_SIZE];
+vec3 box_centers[BUFFER_SIZE];
+vec3 box_sizes[BUFFER_SIZE];
+vec3 box_colors[BUFFER_SIZE];
+
+const float box_size = 0.1;
+const float box_spacing = 0.3;
+const float x_offset = (float(LOG_FFT_SIZE) * box_spacing) / 2.0;
+
+const vec3 green = vec3(0.0, 1.0, 0.0);
+const vec3 yellow = vec3(1.0, 1.0, 0.0);
+const vec3 red = vec3(1.0, 0.0, 0.0);
+
+
+/////////////////////////////////////////////////////
+//// audio fft texture lookup
+/////////////////////////////////////////////////////
+
+float getAudioFFT(int row, int freqIdx) { 
+    return texture2D(iAudioTexture, vec2(
+        (float(freqIdx) + 0.5) / float(LOG_FFT_SIZE),
+        (float(row) + 0.5) / float(FREQ_BUFFER_FRAMES)
+    )).r;
+}
+
+float getCurrentAudioVolumedB() {
+    float sum = 0.0;
+    for (int i = 0; i < LOG_FFT_SIZE; i++) {
+        sum += getAudioFFT(0, i);
+    }
+    return clamp(log2(sum / float(LOG_FFT_SIZE)) * 10.0, -60.0, 0.0); // Convert to decibels
+}
+
+void convertAudioFFTToDB() {
+    int row = iAudioHead;
+    for (int i = 0; i < BUFFER_SIZE; i+=LOG_FFT_SIZE) {
+        for (int j = 0; j < LOG_FFT_SIZE; j++) {
+            float dB = getAudioFFT(row, j); // Get the FFT value
+            dBs[i + j] = dB; // Convert to 0-255 range
+            box_sizes[i + j].y = 0.05 + dB * 1.3; // Box size based on FFT value
+        }
+        row--;
+        if (row < 0) {
+            row += FREQ_BUFFER_FRAMES;
+        }
+    }
+}
 
 /////////////////////////////////////////////////////
 //// sdf functions
@@ -41,7 +92,6 @@ float simplex_noise(vec2 p) {
 }
 
 
-
 /////////////////////////////////////////////////////
 //// boolean operations
 /////////////////////////////////////////////////////
@@ -67,96 +117,68 @@ float sdfSubtraction(float s1, float s2)
 
 //// sdf: p - query point
 //// returns vec4: sdf value (float) and color (vec3)
-vec4 sdf(vec3 p)
+vec4 sdf(vec3 p, int get_color)
 {
-    float s = 0.;
-
-    //// 1st object: plane
-    float plane1_h = 0.0;
-    
-    //// 2nd object: sphere
-    vec3 sphere1_c = vec3(-2.0, 1.0, 0.0);
-    float sphere1_r = 0.25;
-
-    //// 3rd object: box
-    vec3 box1_c = vec3(-1.0, 1.0, 0.0);
-    vec3 box1_b = vec3(0.2, 0.2, 0.2);
-
-    //// 4th object: box-sphere subtraction
-    vec3 box2_c = vec3(0.0, 1.0, 0.0);
-    vec3 box2_b = vec3(0.3, 0.3, 0.3);
-
-    vec3 sphere2_c = vec3(0.0, 1.0, 0.0);
-    float sphere2_r = 0.4;
-
-    //// 5th object: sphere-sphere intersection
-    vec3 sphere3_c = vec3(1.0, 1.0, 0.0);
-    float sphere3_r = 0.4;
-
-    vec3 sphere4_c = vec3(1.3, 1.0, 0.0);
-    float sphere4_r = 0.3;
-
-    //// calculate the sdf based on all objects in the scene
-    
-    float plane1_sdf = sdfPlane(p, plane1_h);
-    float sphere1_sdf = sdfSphere(p, sphere1_c, sphere1_r);
-    float box1_sdf = sdfBox(p, box1_c, box1_b);
-    float box2_sdf = sdfBox(p, box2_c, box2_b);
-    float sphere2_sdf = sdfSphere(p, sphere2_c, sphere2_r);
-    float sphere3_sdf = sdfSphere(p, sphere3_c, sphere3_r);
-    float sphere4_sdf = sdfSphere(p, sphere4_c, sphere4_r);
-
-    // plane and sphere
-    s = sdfUnion(plane1_sdf, sphere1_sdf);
-
-    // box
-    s = sdfUnion(s, box1_sdf);
-
-    // box-sphere subtraction
-    float box_sphere_subtraction = sdfSubtraction(box2_sdf, sphere2_sdf);
-    s = sdfUnion(s, box_sphere_subtraction);
-
-    // sphere-sphere intersection
-    float sphere_sphere_intersection = sdfIntersection(sphere3_sdf, sphere4_sdf);
-    s = sdfUnion(s, sphere_sphere_intersection);
-
-    vec3 color = vec3(0.7, 0.7, 0.0); // default color
-    if(sphere1_sdf == s){
-        color =  vec3(1.0, 0.0, 0.0);
+    vec3 dir = p - CAM_POS;
+    int j_start = 0;
+    int j_end = LOG_FFT_SIZE;
+    if (dir.x < 0.0) {
+        j_end = int(ceil((p.x + x_offset + box_size) / box_spacing));
+    } else {
+        j_start = int(floor((p.x + x_offset - box_size) / box_spacing));
     }
-    else if(box1_sdf == s){
-        color =  vec3(0.0, 1.0, 0.0);
+    int i_start = max(int(floor((p.z - box_size) / box_spacing)), 0) * LOG_FFT_SIZE;
+
+    if (i_start >= BUFFER_SIZE || j_start >= LOG_FFT_SIZE || j_end < 0 || abs(p.y) > 3.5) {
+        return vec4(0.0, 0.0, 0.0, 100.0); // return background color
     }
-    else if(box_sphere_subtraction == s){
-        color =  vec3(0.0, 0.0, 1.0);
+
+    float s = 100.0;
+    vec3 color = vec3(0.0, 0.0, 0.0);
+
+    for (int i = i_start; i < BUFFER_SIZE; i+=LOG_FFT_SIZE) {
+        for (int j = j_start; j < j_end; j++) {
+            float dB = dBs[i + j];
+            vec3 box_c = box_centers[i + j]; // Box center
+            vec3 box_s = box_sizes[i + j]; // Box size
+            float box_sdf = sdfBox(p, box_c, box_s); // SDF for the box
+            if (box_sdf < 0.001) {
+                s = box_sdf;
+                if (get_color == 0) {
+                    return vec4(0.0, 0.0, 0.0, s); // return sdf value only
+                } else {
+                    if (dB < 0.5) {
+                        color = mix(green, yellow, dB / 0.5); // interpolate between green and yellow
+                    } else {
+                        color = mix(yellow, red, (dB - 0.5) * 2.0); // interpolate between yellow and red
+                    }
+                    return vec4(color, s); // return color and sdf value
+                }
+            } else {
+                s = min(s, box_sdf); // keep the minimum sdf value
+            }
+        }
     }
-    else if(sphere_sphere_intersection == s){
-        color =  vec3(1.0, 1.0, 0.2);
-    }
-    return vec4(color, s); // return color and sdf value
+
+    return vec4(0.0, 0.0, 0.0, s); // return color and sdf value
 }
 
 /////////////////////////////////////////////////////
 //// ray marching
 /////////////////////////////////////////////////////
 
-/////////////////////////////////////////////////////
-//// Step 4: ray marching
-//// You are asked to implement the ray marching algorithm within the following for-loop.
-/////////////////////////////////////////////////////
-
 //// ray marching: origin - ray origin; dir - ray direction 
 float rayMarching(vec3 origin, vec3 dir)
 {
     float s = 0.0;
-    for(int i = 0; i < 100; i++)
+    for(int i = 0; i < 15; i++)
     {
         //// your implementation starts
 
         vec3 p = origin + s * dir;
-        float sdf_p = sdf(p).w;
+        float sdf_p = sdf(p, 0).w;
 
-        if(sdf_p < 0.001){
+        if(sdf_p < 0.001 || sdf_p > 10.0){
             break;
         }
 
@@ -172,22 +194,17 @@ float rayMarching(vec3 origin, vec3 dir)
 //// normal calculation
 /////////////////////////////////////////////////////
 
-/////////////////////////////////////////////////////
-//// Step 5: normal calculation
-//// You are asked to calculate the sdf normal based on finite difference.
-/////////////////////////////////////////////////////
-
 //// normal: p - query point
 vec3 normal(vec3 p)
 {
-    float s = sdf(p).w;          //// sdf value in p
+    float s = sdf(p, 0).w;          //// sdf value in p
     float dx = 0.01;           //// step size for finite difference
 
     //// your implementation starts
 
-    float sdf_gradient_x = sdf(p + vec3(dx, 0.0, 0.0)).w - sdf(p - vec3(dx, 0.0, 0.0)).w;
-    float sdf_gradient_y = sdf(p + vec3(0.0, dx, 0.0)).w - sdf(p - vec3(0.0, dx, 0.0)).w;
-    float sdf_gradient_z = sdf(p + vec3(0.0, 0.0, dx)).w - sdf(p - vec3(0.0, 0.0, dx)).w;
+    float sdf_gradient_x = sdf(p + vec3(dx, 0.0, 0.0), 0).w - sdf(p - vec3(dx, 0.0, 0.0), 0).w;
+    float sdf_gradient_y = sdf(p + vec3(0.0, dx, 0.0), 0).w - sdf(p - vec3(0.0, dx, 0.0), 0).w;
+    float sdf_gradient_z = sdf(p + vec3(0.0, 0.0, dx), 0).w - sdf(p - vec3(0.0, 0.0, dx), 0).w;
 
     return normalize(vec3(sdf_gradient_x, sdf_gradient_y, sdf_gradient_z));
 
@@ -198,68 +215,37 @@ vec3 normal(vec3 p)
 //// Phong shading
 /////////////////////////////////////////////////////
 
-/////////////////////////////////////////////////////
-//// Step 6: lighting and coloring
-//// You are asked to specify the color for each object in the scene.
-//// Each object must have a separate color without mixing.
-//// Notice that we have implemented the default Phong shading model for you.
-/////////////////////////////////////////////////////
-
 vec3 phong_shading(vec3 p, vec3 n)
 {
     //// background
     if(p.z > 10.0){
-        return vec3(0.9, 0.6, 0.2);
+        return vec3(0.0, 0.0, 0.0);
     }
 
+    return sdf(p, 1).xyz;
+
     //// phong shading
-    vec3 lightPos = vec3(4.*sin(iTime), 4., 4.*cos(iTime));  
-    vec3 l = normalize(lightPos - p);               
-    float amb = 0.1;
-    float dif = max(dot(n, l), 0.) * 0.7;
-    vec3 eye = CAM_POS;
-    float spec = pow(max(dot(reflect(-l, n), normalize(eye - p)), 0.0), 128.0) * 0.9;
+    // vec3 lightPos = CAM_POS * 2.0;
+    // vec3 l = normalize(lightPos - p);
+    // float amb = 0.8;
+    // float dif = max(dot(n, l), 0.) * 0.3;
+    // vec3 eye = CAM_POS;
+    // float spec = pow(max(dot(reflect(-l, n), normalize(eye - p)), 0.0), 128.0) * 0.45;
 
-    vec3 sunDir = vec3(0, 1, -1);
-    float sunDif = max(dot(n, sunDir), 0.) * 0.2;
+    // vec3 sunDir = vec3(0, 1, -1);
+    // float sunDif = max(dot(n, sunDir), 0.) * 0.2;
+    
 
-    //// shadow
-    float s = rayMarching(p + n * 0.02, l);
-    if(s < length(lightPos - p)) dif *= .2;
-
-    vec3 color = vec3(1.0, 1.0, 1.0);
+    vec3 color = vec3(0.0, 0.0, 0.0);
 
     //// your implementation for coloring starts
 
-    color = sdf(p).xyz;
+    color = sdf(p, 1).xyz;
 
     //// your implementation for coloring ends
+    return color;
 
-    return (amb + dif + spec + sunDif) * color;
-}
-
-/////////////////////////////////////////////////////
-//// Step 7: creative expression
-//// You will create your customized sdf scene with new primitives and CSG operations in the sdf2 function.
-//// Call sdf2 in your ray marching function to render your customized scene.
-/////////////////////////////////////////////////////
-
-float sdCone( vec3 p, vec2 c, float h, vec3 center)
-{
-  p -= center;
-
-  // c is the sin/cos of the angle, h is height
-  // Alternatively pass q instead of (c,h),
-  // which is the point at the base in 2D
-  vec2 q = h*vec2(c.x/c.y,-1.0);
-    
-  vec2 w = vec2( length(p.xz), p.y );
-  vec2 a = w - q*clamp( dot(w,q)/dot(q,q), 0.0, 1.0 );
-  vec2 b = w - q*vec2( clamp( w.x/q.x, 0.0, 1.0 ), 1.0 );
-  float k = sign( q.y );
-  float d = min(dot( a, a ),dot(b, b));
-  float s = max( k*(w.x*q.y-w.y*q.x),k*(w.y-q.y)  );
-  return sqrt(d)*sign(s);
+    // return (amb + dif + spec + sunDif) * color;
 }
 
 /////////////////////////////////////////////////////
@@ -269,9 +255,28 @@ float sdCone( vec3 p, vec2 c, float h, vec3 center)
 void mainImage(out vec4 fragColor, in vec2 fragCoord)
 {
     vec2 uv = (fragCoord.xy - .5 * iResolution.xy) / iResolution.y;         //// screen uv
-    vec3 origin = CAM_POS;                                                  //// camera position 
-    vec3 dir = normalize(vec3(uv.x, uv.y, 1));                              //// camera direction
+    vec3 origin = CAM_POS;                                                  //// camera position
+    vec3 center = vec3(0.0, 0.0, 0.0);                                      /// scene center
+
+    vec3 f = normalize(center - origin);                                 //// camera forward direction
+    vec3 r = normalize(cross(vec3(0.0, 1.0, 0.0), f));                   //// camera right direction
+    vec3 u = cross(f, r);                                                //// camera up direction
+    vec3 dir = normalize(uv.x * r + uv.y * u + f);                       //// camera direction
+
+    for (int i = 0; i < FREQ_BUFFER_FRAMES; i++) {
+        for (int j = 0; j < LOG_FFT_SIZE; j++) {
+            box_centers[i * LOG_FFT_SIZE + j] = vec3(float(j) * box_spacing - x_offset, 0.0, float(i) * box_spacing);
+            box_sizes[i * LOG_FFT_SIZE + j] = vec3(box_size, 0.05, box_size);
+        }
+    }
+
+    convertAudioFFTToDB();
+
     float s = rayMarching(origin, dir);                                     //// ray marching
+    if(s > 10.0) {                                                         //// ray marching failed
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);                              //// background color
+        return;
+    }
     vec3 p = origin + dir * s;                                              //// ray-sdf intersection
     vec3 n = normal(p);                                                     //// sdf normal
     vec3 color = phong_shading(p, n);                                       //// phong shading
